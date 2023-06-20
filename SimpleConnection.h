@@ -50,20 +50,18 @@ namespace Simple{
     class AbstractConnection : public Task{
         uint8_t RetryCount;
         uint16_t Timeout;
-        time_t ClockOffset, ClockDelta;
-
+        uint16_t ClockDelta;
+        time_t ClockOffset;
     public:
         AbstractConnection(uint8_t retries, uint16_t timeout) : RetryCount(retries), Timeout(timeout), ClockOffset(Timer::NativeMillis()), ClockDelta(0){}
-        void SetClockOffset(time_t t){
-            ClockDelta = ClockOffset - t;
-            ClockOffset = t;
-        }
         inline uint16_t GetClockNow(){ return Timer::NativeMillis() - ClockOffset; }
-        TaskReturn Fire() final {
-
-            if(Timer::NativeMillis() - ClockOffset > numeric_limits<uint16_t>::max() - max(5000, (int) Timeout))
-                SetClockOffset(Timer::NativeMillis());  //Reset Clock Offset
-
+        TaskReturn Fire() override {
+            auto now = Timer::NativeMillis();
+            if(now - ClockOffset > numeric_limits<uint16_t>::max() - max(5000, (int) Timeout)){
+                ClockDelta = now - ClockOffset; //Reset Clock Offset
+                ClockOffset = now;
+                OnClockReset(ClockDelta);
+            }
             ReadFromSocket();
             WritePackets();
 
@@ -76,6 +74,8 @@ namespace Simple{
     protected:
         IOBuffer read_buffer, write_buffer;
         volatile uint8_t packet_count = 0;
+
+        virtual void OnClockReset(uint16_t delta){}
 
         void SendData(PacketInfo& info, Lambda<void (IOBuffer&)>& callback){
             write_buffer.SeekEnd();
@@ -116,7 +116,7 @@ namespace Simple{
             return false;
         }
         virtual void ReadFromSocket() = 0;
-        virtual void WriteToSocket(IOBuffer& buffer, int length) = 0;
+        virtual bool WriteToSocket(PacketInfo& pi, IOBuffer& buffer, int length) = 0;
         virtual bool CanWritePacket(PacketInfo& pi, bool& dispose){
             if(pi.Type == ReceivedPacketType){  //Force Dispose And Write
                 dispose = true;
@@ -140,15 +140,12 @@ namespace Simple{
                     WalkPackets(lam);
                     return true;
                 }
-                case SynchronizeTimePacketType:
-                    SetClockOffset(io.Read<uint32_t>());
-                    return true;
                 default:
                     SendRxPacket(info);
                     return false;
             }
         }
-        virtual void WritePackets(){
+        void WritePackets(){
             define_local_lambda(lam, [&], bool, (PacketInfo& pi, bool& dispose), return CanWritePacket(pi, dispose));
             WalkPackets(lam);
         }
@@ -159,8 +156,10 @@ namespace Simple{
             auto packet_head_length = write_buffer.Position() - packet_start;
             auto len = info.Size + sizeof(TAIL_MAGIC_NUMBER) + packet_head_length;
             write_buffer.Seek(packet_start);
-            if(write)
-                WriteToSocket(write_buffer, len);
+            if(write){
+                if(!WriteToSocket(info, write_buffer, len))   //Cant Dispose since it cant write
+                    dispose = false;
+            }
             if(dispose){
                 write_buffer.RemoveRange(data_start, packet_start + len);
                 write_buffer.Seek(data_start);
@@ -172,7 +171,7 @@ namespace Simple{
             auto& info = reinterpret_cast<PacketInfo&>(info_storage);
             auto startPtr = write_buffer.Position();
             while(ReadPacketInfo(info, write_buffer, true)){ //Has Packet
-                info.LastRetryTime += ClockDelta;                                      //Adjust to new time
+                info.LastRetryTime -= ClockDelta;                                      //Adjust to new time
                 write_buffer.Seek(startPtr);
                 bool dispose = false;
                 bool write = onPacket(info, dispose);
@@ -217,6 +216,7 @@ namespace Simple{
     };
 
     struct Connection : public AbstractConnection{
+        Connection(uint8_t retries, uint16_t timeout) : AbstractConnection(retries, timeout){}
         template<typename ...Args> void Send(uint8_t type, Args... args){
             auto t = tuple<Args...>(args...);
             define_local_lambda(lam, [&], void, (IOBuffer& io), io.WriteStd(t));
@@ -233,6 +233,28 @@ namespace Simple{
             SendData(type, lam);
         }
         void SendRxPacket(PacketInfo& p) override{ Send(ReceivedPacketType, p.Type); }
+    };
+
+    struct StableConnection : Connection{
+        StableConnection() : Connection(0, 0){}
+        void SendRxPacket(PacketInfo& p) final {}
+        bool HandlePacket(PacketInfo& info, IOBuffer& io) final { return false; }
+        bool CanWritePacket(PacketInfo& pi, bool& dispose) final { dispose = true; return true;}
+        bool ReadPacketInfo(PacketInfo& p, IOBuffer& io, bool readTransient) final {
+            if(io.BytesAvailable() >= 3 + readTransient ? 4 : 0){
+                if(readTransient)
+                    io.SeekDelta(sizeof(MAGIC_NUMBER));
+                io.ReadBytesUnlocked((uint8_t*) &p, 3); //Write Size, Type, ID
+                return true;
+            }
+            return false;
+        }
+        size_t WritePacketInfo(PacketInfo& p, bool writeTransient) final {
+            auto pos = write_buffer.Position();
+            write_buffer.WriteStd(MAGIC_NUMBER);
+            write_buffer.Write(p.Size, p.Type, p.ID);
+            return pos;
+        }
     };
 
     struct MultiPacketInfo : public PacketInfo{
@@ -289,49 +311,64 @@ namespace Simple{
         inline void SendData(uint8_t to, uint8_t type, Simple::IO& io){ SendData(to, type, io, io.BytesAvailable()); }
     };
 
-    /*
-    struct SyncMultiConnection : public MultiConnection{
-    public:
+    struct TDMAMultiConnection : public MultiConnection{
+    protected:
         uint8_t LastRxID = 0;
-        uint32_t LastRxTime = 0;
-        uint16_t NodeReadTimeOut;
+        uint16_t LastRxTime = 0;
+        uint16_t LastSyncTime = 0;
+        uint16_t EstimatedLatency = 20;
 
-        SyncMultiConnection(uint8_t id, uint16_t node_timeout) : MultiConnection(id), NodeReadTimeOut(node_timeout){}
+        void OnClockReset(uint16_t delta) override {
+            LastRxTime -= delta;
+            LastSyncTime -= delta;
+        }
+        bool CanWritePacket(PacketInfo& pi, bool& dispose) override {
+            if(pi.Type == SynchronizeTimePacketType){  //Force Dispose And Write
+                dispose = true;
+                return true;
+            }
+            return MultiConnection::CanWritePacket(pi, dispose);
+        }
+        bool CanWrite(){ return (LastRxID + 1 == ID) || (LastRxID + 1 == DeviceCount && ID == 0); }
+        bool HandlePacket(PacketInfo& info, IOBuffer& io) override {
+            if (info.Type == SynchronizeTimePacketType) {
+                LastRxTime = GetClockNow();
+                MultiConnection::SendRxPacket(info);    //Send this to calculate the latency
+                LastRxID = io.ReadByte();
+                return true;
+            }
+            if (info.Type == ReceivedPacketType && *io.Interpret<uint8_t>() == SynchronizeTimePacketType){
+                EstimatedLatency = (GetClockNow() - LastSyncTime) / 2;
+                return true;
+            }else return MultiConnection::HandlePacket(info, io);
+        }
+    public:
+        uint16_t SyncInterval = 0;
+        uint16_t NodeReadTimeOut = 50;
+        uint8_t DeviceCount = 1;
 
-        //Round Robin Communication
+        TDMAMultiConnection(uint8_t id, uint8_t retries, uint16_t retry_timeout) : MultiConnection(id, retries, retry_timeout){}
+
         TaskReturn Fire() override{
-            UpdateWrite();
-            return Connection::Fire();
-        }
-
-        void SkipNodeWrite(){
-            if(++LastRxID >= connections)
-                LastRxID = 0;
-        }
-
-        //Round Robin Communication
-        void FlushWriteBuffer() override{
-            if((LastRxID + 1 == ID) || (LastRxID + 1 == connections && ID == 0)){
-                if(!BytesAvailable()){
-                    Connection::FlushWriteBuffer();
-                    SkipNodeWrite();
+            auto now = GetClockNow();
+            if(now - LastRxTime > NodeReadTimeOut){
+                if(++LastRxID >= DeviceCount)
+                    LastRxID = 0;
+                LastRxTime = now;
+            }
+            if(SyncInterval > 0){
+                if(now - LastSyncTime > SyncInterval){
+                    for(int i = 0; i < DeviceCount; i++){
+                        if(i != ID)
+                            Send(i, SynchronizeTimePacketType, LastRxID);
+                    }
+                    LastSyncTime = now;
+                    LastRxTime = now + EstimatedLatency; //Allow some time for everything to be sent
                 }
             }
-        }
-
-        void onPacketReceived(MultiPacketHeader& header, IOBuffer& io) override{ LastRxTime = Timer::Millis(); }
-
-    protected:
-        void UpdateWrite(){
-            if((Timer::Millis() - LastRxTime > NodeReadTimeOut) && !BytesAvailable()){
-                SkipNodeWrite();
-                FlushWriteBuffer();
-                LastRxTime = Timer::Millis();
-            }
+            return MultiConnection::Fire();
         }
     };
-    
-    */
 }
 
 #endif

@@ -33,6 +33,7 @@ namespace Simple{
     template<typename TFun> struct Lambda : public decltype(__internal_lambda_type__(declval<TFun>())){
         using InternalLambdaType = decltype(__internal_lambda_type__(declval<TFun>()));
         Lambda(){}
+        Lambda(void* fn, ref<>& lambda) : InternalLambdaType(fn, lambda){}
 
         template<typename F>
         static inline Lambda make_lambda(ref<F>& lambda){
@@ -40,7 +41,6 @@ namespace Simple{
         }
 
     private:
-        Lambda(void* fn, ref<>& lambda) : InternalLambdaType(fn, lambda){}
 
         template<typename F, typename TRet, typename ...TArgs>
         static inline Lambda __make_lambda_internal__(ref<F>& lambda, Template<Function<TRet, TArgs...>>){
@@ -48,10 +48,10 @@ namespace Simple{
         }
     };
 
-    template<typename TRet, typename ...TArgs> Lambda<TRet (TArgs...)> GlobalLambda(TRet (*f)(TArgs...)){
+    template<typename TRet, typename ...TArgs> inline Lambda<TRet (TArgs...)> StaticLambda(TRet (*f)(TArgs...)){
         using TF = TRet (*)(TArgs...);
         auto lr = LocalRef(f);
-        return Lambda<TF>((void*) ((TF) [](uint8_t* lam, TArgs... args){return ((TF) lam)(args...);}), lr);
+        return Lambda<TRet (TArgs...)>((void*) (TRet (*)(uint8_t*, TArgs...)) ([](uint8_t* lam, TArgs... args){return ((TF) lam)(args...);}), (ref<>&) lr);
     }
     template<typename TFun, typename F> inline Lambda<TFun> LocalLambda(F& lambda){
         auto l = LocalRef(&lambda);
@@ -80,5 +80,8 @@ namespace Simple{
 #define define_global_lambda(local_name, capture_type, ret, args, ...) \
         auto CAT(__lambda, __LINE__) = capture_type args -> ret { __VA_ARGS__; };  \
         auto local_name = GlobalLambda<ret args>(CAT(__lambda, __LINE__))
+
+#define make_static_lambda(ret, args, ...) \
+        StaticLambda((ret (*) args) ([] args -> ret { __VA_ARGS__; }))
 }
 #endif

@@ -7,11 +7,14 @@
 
 using namespace Simple;
 
-struct TestConnection : public MultiConnection {
+struct TestConnection : public TDMAMultiConnection {
     IOBuffer store_buffer;
     vector<TestConnection *> receivers;
 
-    TestConnection(int id) : MultiConnection(id, 3, 50){}
+    TestConnection(int id) : TDMAMultiConnection(id, 3, 50){
+        DeviceCount = 3;
+        NodeReadTimeOut = 200;
+    }
 
     void SendRxPacket(PacketInfo& p) override {
         if(GetClockNow() % 2 == 0)  //Introduce Noise
@@ -37,14 +40,17 @@ struct TestConnection : public MultiConnection {
 
     void onPacketCorrupted(PacketInfo& info) final { println("Connection [%i]: Corrupted", ID); }
 
-    void WriteToSocket(IOBuffer& io, int nbytes) final {
-        auto s = io.Position();
-        for (auto a: receivers){
-            io.Seek(s);
-            //a->store_buffer.WriteByte(nbytes);   //Introduce Noise
-            a->store_buffer.ReadFrom(io, nbytes);
-          //  a->store_buffer.WriteByte(nbytes);   //Introduce Noise
-        }
+    bool WriteToSocket(PacketInfo& pi, IOBuffer& io, int nbytes) final {
+        if(CanWrite()){
+            auto s = io.Position();
+            for (auto a: receivers){
+                io.Seek(s);
+                a->store_buffer.WriteByte(nbytes);   //Introduce Noise
+                a->store_buffer.ReadFrom(io, nbytes);
+                a->store_buffer.WriteByte(nbytes);   //Introduce Noise
+            }
+            return true;
+        }else return false;
     }
 
     void ReadFromSocket() final {
@@ -67,11 +73,12 @@ void test_connection() {
     c0->Start();
     c1->Start();
     c2->Start();
+    c0->SyncInterval = 5000;
 
     c0->Send(1, 1, 2.5f);
     c1->Send(0, 2, 8L);
-    define_local_lambda(print_c0, [], void, (IOBuffer & io), io.PrintfEnd("\tFrom C[0]\t", 123));
-    c0->SendData(2, 3, print_c0);
+    auto l = make_static_lambda(void, (IOBuffer & io), io.PrintfEnd("\tFrom C[0]\t", 123));
+    c0->SendData(2, 3, l);
 
     c0->Send(1, 1, 2.5f);
     define_local_lambda(internal_timer_lam, [], void, (IOBuffer& io), io.PrintfEnd("\tHello From Timer!\t"));
