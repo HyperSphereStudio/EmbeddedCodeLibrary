@@ -1,0 +1,3 @@
+sandbox/.idea/*
+sandbox/cmake-build-debug/*
+sandbox/cmake-build-release/*
