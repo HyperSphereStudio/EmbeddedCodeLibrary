@@ -15,9 +15,15 @@
 
 #include "SimpleMath.h"
 
-#define print(fmt, ...) Out.Printf(fmt, ##__VA_ARGS__)
+#ifndef print
+    #define print(fmt, ...) Out.Printf(fmt, ##__VA_ARGS__)
+#endif
+
+#ifndef printerr
+    #define printerr(fmt, ...) Error.Printf(fmt, ##__VA_ARGS__)
+#endif
+
 #define println(fmt, ...) print(fmt "\r\n", ##__VA_ARGS__)
-#define printerr(fmt, ...) Error.Printf(fmt, ##__VA_ARGS__)
 #define printerrln(fmt, ...) printerr(fmt "\r\n", ##__VA_ARGS__)
 
 namespace Simple {
@@ -444,6 +450,7 @@ namespace Simple {
         inline size_t Capacity() { return memory.size(); }
         inline size_t Size(){ return memory.size(); }
         inline void SetSize(size_t s){ memory.resize(s); }
+        inline void Reserve(size_t s) { memory.reserve(s); }
         void Print(IO& io){
             io.WriteByte('[');
             for(int i = position; i < memory.size(); i++){
@@ -451,7 +458,7 @@ namespace Simple {
                     io.Printf(", %i", memory[i]);
                 else io.Printf("%i", memory[i]);
             }
-            io.Printf(": Size=%i, Position=%i]\n", Size(), Position());
+            io.Printf(": Size=%i, Position=%i]\n\r", Size(), Position());
         }
 
         void Clear(){

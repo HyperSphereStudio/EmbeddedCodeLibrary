@@ -60,7 +60,12 @@ namespace Simple{
 
         int WriteBytes(uint8_t *ptr, int nbytes) final { return rf95.send(ptr, nbytes); }
         int BytesAvailable() final { return rf95.available() ? RH_RF95_MAX_MESSAGE_LEN : 0; }
-        int ReadBytesUnlocked(uint8_t *ptr, int buffer_size) final { rf95.recv(ptr, reinterpret_cast<uint8_t*>(&buffer_size)); return buffer_size; }
+        int ReadBytesUnlocked(uint8_t *ptr, int buffer_size) final {
+            uint8_t len = buffer_size;
+            if(rf95.recv(ptr, &len))
+                return len;
+            return 0;
+        }
     };
 
     class RadioConnection : public TDMAMultiConnection, protected RadioIO{
@@ -71,8 +76,7 @@ namespace Simple{
 
         bool Initialize(float frequency, int8_t power, Range range, bool useRFO = false) override {
             auto b = RadioIO::Initialize(frequency, power, range, useRFO);
-            rf95.setPreambleLength(4);  //Get rid of the preamble, internal system has one
-            rf95.setPromiscuous(false);
+            rf95.setThisAddress(ID);
             return b;
         }
 
@@ -85,8 +89,8 @@ namespace Simple{
                     up(p).From = io.ReadByte();
                     p.ID = io.ReadByte();
                     io.SeekDelta(sizeof(MAGIC_NUMBER));
-                }else {
-                    up(p).To = rf95.headerTo();
+                }else{
+                    up(p).To = ID;
                     up(p).From = rf95.headerFrom();
                     p.ID = rf95.headerId();
                 }
@@ -109,20 +113,28 @@ namespace Simple{
         }
 
         SocketReturn WriteToSocket(PacketInfo& pi, IOBuffer& io, int nbytes) override {
-            if(CanWrite() && !rf95.isChannelActive()){
+            if(CanWrite()){
                 rf95.setHeaderTo(up(pi).To);
-                rf95.setHeaderFrom(up(pi).From);
                 rf95.setHeaderId(pi.ID);
-                io.ReadBytesUnlocked(buffer, nbytes);
-                RadioIO::WriteBytes(buffer, nbytes);
-                rf95.setModeRx();
+                rf95.setHeaderFrom(ID);
+                rf95.send(io.Interpret(), nbytes);
                 return None;
-            }else return DontDispose;
+            }else if(write_buffer.Size() > RH_RF95_MAX_MESSAGE_LEN)
+                rf95.waitPacketSent(20);    //Prevent
+            return DontDispose;
+        }
+
+        TaskReturn Fire() override {
+            YIELD;
+            return TDMAMultiConnection::Fire();
         }
 
         void ReadFromSocket() override {
-            int nbytes = RadioIO::ReadBytesUnlocked(buffer, RH_RF95_MAX_MESSAGE_LEN);
-            ReceiveBytes(buffer, nbytes);
+            if(RadioIO::BytesAvailable()){
+                int bytesRead = RadioIO::ReadBytesUnlocked(buffer, RH_RF95_MAX_MESSAGE_LEN);
+                if(bytesRead > 0)
+                    ReceiveBytes(buffer, bytesRead);
+            }
         }
     };
 }
