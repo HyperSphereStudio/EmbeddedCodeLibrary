@@ -44,45 +44,45 @@ namespace Simple{
 
     struct PacketInfo{
         uint8_t Size, Type, ID, Retries;
-        uint16_t LastRetryTime;
+        TimeDecay<uint16_t> Retry;
     };
 
-    class AbstractConnection : public Task{
+    enum SocketReturn{
+        DontDispose,
+        None
+    };
+
+    class AbstractConnection : public Task, public TimeKeeper<uint16_t>{
         uint8_t RetryCount;
         uint16_t Timeout;
-        uint16_t ClockDelta;
-        time_t ClockOffset;
     public:
-        AbstractConnection(uint8_t retries, uint16_t timeout) : RetryCount(retries), Timeout(timeout), ClockOffset(Timer::NativeMillis()), ClockDelta(0){}
-        inline uint16_t GetClockNow(){ return Timer::NativeMillis() - ClockOffset; }
+        using Time = TimeDecay<uint16_t>;
+
+        AbstractConnection(uint8_t retries, uint16_t timeout) : RetryCount(retries), Timeout(timeout){}
         TaskReturn Fire() override {
-            auto now = Timer::NativeMillis();
-            if(now - ClockOffset > numeric_limits<uint16_t>::max() - max(5000, (int) Timeout)){
-                ClockDelta = now - ClockOffset; //Reset Clock Offset
-                ClockOffset = now;
-                OnClockReset(ClockDelta);
-            }
             ReadFromSocket();
             WritePackets();
-
             return TaskReturn::Nothing;
         }
-
         inline size_t ReadBufferSize() { return read_buffer.Size(); }
         inline size_t WriteBufferSize() { return write_buffer.Size(); }
+        inline void SetBufferMax(size_t max){
+            read_buffer.SetMax(max);
+            write_buffer.SetMax(max);
+        }
 
     protected:
         IOBuffer read_buffer, write_buffer;
         volatile uint8_t packet_count = 0;
 
-        virtual void OnClockReset(uint16_t delta){}
+        inline uint16_t UpdateTime(uint16_t old_time, uint16_t delta){ return old_time + delta; }
 
         void SendData(PacketInfo& info, Lambda<void (IOBuffer&)>& callback){
             write_buffer.SeekEnd();
             auto start = write_buffer.Position();
             info.ID = packet_count++;
             info.Retries = 0;
-            info.LastRetryTime = 0;
+            info.Retry = setDecay(0);
             WritePacketInfo(info, true);
             auto start_payload = write_buffer.Position();
             callback(write_buffer);
@@ -97,17 +97,17 @@ namespace Simple{
         virtual void onPacketCorrupted(PacketInfo& p) = 0;
         virtual size_t WritePacketInfo(PacketInfo& p, bool writeTransient){
             if(writeTransient)
-                write_buffer.Write(p.Retries, p.LastRetryTime);
+                write_buffer.Write(p.Retries, p.Retry);
             auto pos = write_buffer.Position();
             write_buffer.WriteStd(MAGIC_NUMBER);
             write_buffer.Write(p.Size, p.Type, p.ID);
             return pos;
         }
         virtual bool ReadPacketInfo(PacketInfo& p, IOBuffer& io, bool readTransient){
-            if(io.BytesAvailable() >= 3 + readTransient ? 7 : 0){
+            if(io.BytesAvailable() >= 3 + readTransient ? (sizeof(MAGIC_NUMBER) + sizeof(Time) + 1) : 0){
                 if(readTransient){
                     p.Retries = io.ReadByte();
-                    p.LastRetryTime = io.Read<uint16_t>();
+                    p.Retry = io.Read<Time>();
                     io.SeekDelta(sizeof(MAGIC_NUMBER));
                 }
                 io.ReadBytesUnlocked((uint8_t*) &p, 3); //Write Size, Type, ID
@@ -116,16 +116,16 @@ namespace Simple{
             return false;
         }
         virtual void ReadFromSocket() = 0;
-        virtual bool WriteToSocket(PacketInfo& pi, IOBuffer& buffer, int length) = 0;
+        virtual SocketReturn WriteToSocket(PacketInfo& pi, IOBuffer& buffer, int length) = 0;
         virtual bool CanWritePacket(PacketInfo& pi, bool& dispose){
             if(pi.Type == ReceivedPacketType){  //Force Dispose And Write
                 dispose = true;
                 return true;
             }
-            if(GetClockNow() - pi.LastRetryTime > Timeout){
-                pi.LastRetryTime = GetClockNow();
-                dispose = ++pi.Retries == RetryCount;
-                return true;
+            if(hasDecayed(pi.Retry)){
+                pi.Retry = setDecay(Timeout);
+                dispose = ++pi.Retries >= RetryCount;
+                return pi.Retries < RetryCount;
             }
             dispose = false;
             return false;
@@ -157,7 +157,8 @@ namespace Simple{
             auto len = info.Size + sizeof(TAIL_MAGIC_NUMBER) + packet_head_length;
             write_buffer.Seek(packet_start);
             if(write){
-                if(!WriteToSocket(info, write_buffer, len))   //Cant Dispose since it cant write
+                auto ret = WriteToSocket(info, write_buffer, len);
+                if(ret == DontDispose)
                     dispose = false;
             }
             if(dispose){
@@ -171,7 +172,6 @@ namespace Simple{
             auto& info = reinterpret_cast<PacketInfo&>(info_storage);
             auto startPtr = write_buffer.Position();
             while(ReadPacketInfo(info, write_buffer, true)){ //Has Packet
-                info.LastRetryTime -= ClockDelta;                                      //Adjust to new time
                 write_buffer.Seek(startPtr);
                 bool dispose = false;
                 bool write = onPacket(info, dispose);
@@ -241,7 +241,7 @@ namespace Simple{
         bool HandlePacket(PacketInfo& info, IOBuffer& io) final { return false; }
         bool CanWritePacket(PacketInfo& pi, bool& dispose) final { dispose = true; return true;}
         bool ReadPacketInfo(PacketInfo& p, IOBuffer& io, bool readTransient) final {
-            if(io.BytesAvailable() >= 3 + readTransient ? 4 : 0){
+            if(io.BytesAvailable() >= 3 + readTransient ? sizeof(MAGIC_NUMBER) : 0){
                 if(readTransient)
                     io.SeekDelta(sizeof(MAGIC_NUMBER));
                 io.ReadBytesUnlocked((uint8_t*) &p, 3); //Write Size, Type, ID
@@ -277,8 +277,9 @@ namespace Simple{
             return v;
         }
         bool ReadPacketInfo(PacketInfo& p, IOBuffer& io, bool readTransient) override{
-            if(io.BytesAvailable() >= 5 + readTransient ? 7 : 0){
-                AbstractConnection::ReadPacketInfo(p, io, readTransient);
+            if(!AbstractConnection::ReadPacketInfo(p, io, readTransient))
+                return false;
+            if(io.BytesAvailable() >= 2){
                 up(p).From = io.ReadByte();
                 up(p).To = io.ReadByte();
                 return true;
@@ -314,14 +315,10 @@ namespace Simple{
     struct TDMAMultiConnection : public MultiConnection{
     protected:
         uint8_t LastRxID = 0;
-        uint16_t LastRxTime = 0;
-        uint16_t LastSyncTime = 0;
+        Time LastRxTime = setDecay(0);
+        Time LastSyncTime = setDecay(0);
         uint16_t EstimatedLatency = 20;
 
-        void OnClockReset(uint16_t delta) override {
-            LastRxTime -= delta;
-            LastSyncTime -= delta;
-        }
         bool CanWritePacket(PacketInfo& pi, bool& dispose) override {
             if(pi.Type == SynchronizeTimePacketType){  //Force Dispose And Write
                 dispose = true;
@@ -332,13 +329,13 @@ namespace Simple{
         bool CanWrite(){ return (LastRxID + 1 == ID) || (LastRxID + 1 == DeviceCount && ID == 0); }
         bool HandlePacket(PacketInfo& info, IOBuffer& io) override {
             if (info.Type == SynchronizeTimePacketType) {
-                LastRxTime = GetClockNow();
+                LastRxTime = setDecay(0);
                 MultiConnection::SendRxPacket(info);    //Send this to calculate the latency
                 LastRxID = io.ReadByte();
                 return true;
             }
             if (info.Type == ReceivedPacketType && *io.Interpret<uint8_t>() == SynchronizeTimePacketType){
-                EstimatedLatency = (GetClockNow() - LastSyncTime) / 2;
+                EstimatedLatency = getDelta(LastSyncTime) / 2;
                 return true;
             }else return MultiConnection::HandlePacket(info, io);
         }
@@ -350,20 +347,19 @@ namespace Simple{
         TDMAMultiConnection(uint8_t id, uint8_t retries, uint16_t retry_timeout) : MultiConnection(id, retries, retry_timeout){}
 
         TaskReturn Fire() override{
-            auto now = GetClockNow();
-            if(now - LastRxTime > NodeReadTimeOut){
+            if(hasDecayed(LastRxTime)){
                 if(++LastRxID >= DeviceCount)
                     LastRxID = 0;
-                LastRxTime = now;
+                LastRxTime = setDecay(NodeReadTimeOut);
             }
             if(SyncInterval > 0){
-                if(now - LastSyncTime > SyncInterval){
+                if(hasDecayed(LastSyncTime)){
                     for(int i = 0; i < DeviceCount; i++){
                         if(i != ID)
                             Send(i, SynchronizeTimePacketType, LastRxID);
                     }
-                    LastSyncTime = now;
-                    LastRxTime = now + EstimatedLatency; //Allow some time for everything to be sent
+                    LastSyncTime = setDecay(SyncInterval);
+                    //LastRxTime.shift(EstimatedLatency);     //Allow some time for everything to be sent
                 }
             }
             return MultiConnection::Fire();

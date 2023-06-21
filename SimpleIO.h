@@ -465,7 +465,7 @@ namespace Simple {
                 position = 0;
             }
         }
-
+        inline void SetMax(size_t max) { max_size = max; }
         template<typename T = uint8_t> T* Interpret(size_t pos){ return (T*) &memory[pos]; }
         template<typename T = uint8_t> T* Interpret(){ return (T*) &memory[position]; }
 

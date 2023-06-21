@@ -77,10 +77,10 @@ namespace Simple{
         }
 
         bool ReadPacketInfo(PacketInfo& p, IOBuffer& io, bool readTransient) override{
-            if(io.BytesAvailable() >= 2 + readTransient ? 10 : 0){
+            if(io.BytesAvailable() >= 2 + readTransient ? sizeof(MAGIC_NUMBER) + 2 + sizeof(Time) : 0){
                 if(readTransient){
                     p.Retries = io.ReadByte();
-                    p.LastRetryTime = io.Read<uint16_t>();
+                    p.Retry = io.Read<Time>();
                     up(p).To = io.ReadByte();
                     up(p).From = io.ReadByte();
                     p.ID = io.ReadByte();
@@ -99,7 +99,7 @@ namespace Simple{
 
         size_t WritePacketInfo(PacketInfo& p, bool writeTransient) override{
             if(writeTransient){
-                write_buffer.Write(p.Retries, p.LastRetryTime);
+                write_buffer.Write(p.Retries, p.Retry);
                 write_buffer.Write(up(p).To, up(p).From, p.ID);
             }
             auto pos = write_buffer.Position();
@@ -108,7 +108,7 @@ namespace Simple{
             return pos;
         }
 
-        bool WriteToSocket(PacketInfo& pi, IOBuffer& io, int nbytes) override {
+        SocketReturn WriteToSocket(PacketInfo& pi, IOBuffer& io, int nbytes) override {
             if(CanWrite() && !rf95.isChannelActive()){
                 rf95.setHeaderTo(up(pi).To);
                 rf95.setHeaderFrom(up(pi).From);
@@ -116,8 +116,8 @@ namespace Simple{
                 io.ReadBytesUnlocked(buffer, nbytes);
                 RadioIO::WriteBytes(buffer, nbytes);
                 rf95.setModeRx();
-                return true;
-            }else return false;
+                return None;
+            }else return DontDispose;
         }
 
         void ReadFromSocket() override {

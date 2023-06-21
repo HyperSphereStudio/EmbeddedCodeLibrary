@@ -9,7 +9,7 @@ using namespace std;
 using namespace std::chrono;
 using namespace Simple;
 
-time_t Simple::Timer::NativeMillis(){
+time_t Simple::NativeMillis(){
     return duration_cast<milliseconds>(chrono::system_clock::now().time_since_epoch()).count();
 }
 

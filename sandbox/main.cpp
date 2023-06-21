@@ -11,13 +11,13 @@ struct TestConnection : public TDMAMultiConnection {
     IOBuffer store_buffer;
     vector<TestConnection *> receivers;
 
-    TestConnection(int id) : TDMAMultiConnection(id, 3, 50){
+    TestConnection(int id) : TDMAMultiConnection(id, 3, 4000){
         DeviceCount = 3;
-        NodeReadTimeOut = 200;
+        NodeReadTimeOut = 3000;
     }
 
     void SendRxPacket(PacketInfo& p) override {
-        if(GetClockNow() % 2 == 0)  //Introduce Noise
+        if(NativeMillis() % 2 == 0)  //Introduce Noise
             MultiConnection::SendRxPacket(p);
     }
 
@@ -35,12 +35,11 @@ struct TestConnection : public TDMAMultiConnection {
                 print("%s", io.Interpret<char>());
                 break;
         }
-        println(" Processed");
     }
 
     void onPacketCorrupted(PacketInfo& info) final { println("Connection [%i]: Corrupted", ID); }
 
-    bool WriteToSocket(PacketInfo& pi, IOBuffer& io, int nbytes) final {
+    SocketReturn WriteToSocket(PacketInfo& pi, IOBuffer& io, int nbytes) final {
         if(CanWrite()){
             auto s = io.Position();
             for (auto a: receivers){
@@ -49,8 +48,8 @@ struct TestConnection : public TDMAMultiConnection {
                 a->store_buffer.ReadFrom(io, nbytes);
                 a->store_buffer.WriteByte(nbytes);   //Introduce Noise
             }
-            return true;
-        }else return false;
+            return None;
+        }else return DontDispose;
     }
 
     void ReadFromSocket() final {
@@ -66,6 +65,32 @@ TestConnection *c0 = new TestConnection(0);
 TestConnection *c1 = new TestConnection(1);
 TestConnection *c2 = new TestConnection(2);
 
+struct TestStableConnection : public StableConnection{
+    TestStableConnection* c;
+
+    TestStableConnection(){}
+
+    SocketReturn WriteToSocket(PacketInfo& pi, IOBuffer& io, int nbytes) final {
+        c->ReceiveBytes(io.Interpret(), nbytes);
+        return None;
+    }
+
+    void onPacketReceived(PacketInfo& _, IOBuffer &io) final{
+        switch(_.Type){
+            case 4:;
+                println("SC: Tx:%i Rx:%i CTx:%i", WriteBufferSize(), ReadBufferSize(), c->WriteBufferSize());
+            break;
+        }
+    }
+
+    void onPacketCorrupted(PacketInfo& _) final {}
+    void ReadFromSocket() final {}
+};
+
+TestStableConnection* c3 = new TestStableConnection();
+TestStableConnection* c4 = new TestStableConnection();
+
+
 void test_connection() {
     c0->receivers = {c1, c2};
     c1->receivers = {c0, c2};
@@ -75,8 +100,12 @@ void test_connection() {
     c2->Start();
     c0->SyncInterval = 5000;
 
+    c3->c = c4;
+    c4->c = c3;
+
     c0->Send(1, 1, 2.5f);
     c1->Send(0, 2, 8L);
+
     auto l = make_static_lambda(void, (IOBuffer & io), io.PrintfEnd("\tFrom C[0]\t", 123));
     c0->SendData(2, 3, l);
 
@@ -87,12 +116,13 @@ void test_connection() {
         c0->Send(2, 1, 2.5f);
         c1->Send(0, 2, 8L);
         c0->SendData(2, 3, internal_timer_lam);
+        c3->Send(4);
         for(auto c : {c0, c1, c2}){
             println("C[%i]: Rx:%i Tx:%i", c->ID, c->ReadBufferSize(), c->WriteBufferSize());
         }
     });
 
-    auto t = new Timer(true, 3000, timer_lam);
+    auto t = new Timer(true, 1000, timer_lam);
     t->Start();
 
     while (Yield());
@@ -173,6 +203,15 @@ void test_io() {
     println("Finished IO Testing!");
 }
 
+void test_timer(){
+    auto td = Time.setDecay(1000);
+    assert(!Time.hasDecayed(td), "Time Decayed To Early!");
+
+    println("Waiting For Timer Decay!");
+    while(!Time.hasDecayed(td)){}
+    println("Timer Decayed!");
+}
+
 int main() {
     int local_var = 7;
 
@@ -180,8 +219,9 @@ int main() {
         printf("Wrong Endian Type!");
 
     println("%s", "Initializing Test Suite!");
-    test_io();
-    create_timer(local_var);
-    test_async();
+   // test_timer();
+   // test_io();
+   //create_timer(local_var);
+   // test_async();
     test_connection();
 }

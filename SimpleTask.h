@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <stdint.h>
+#include "SimpleLambda.h"
 
 using namespace std;
 
