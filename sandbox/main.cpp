@@ -1,9 +1,7 @@
-#define DEBUG
-
 #include <iostream>
 #include "../devices/SimplePC.h"
-#include "../SimpleDebug.h"
-#include "../SimpleConnection.h"
+#include "../SimpleDebug.hpp"
+#include "../SimpleConnection.hpp"
 
 using namespace Simple;
 
@@ -11,19 +9,13 @@ struct TestConnection : public TDMAMultiConnection {
     IOBuffer store_buffer;
     vector<TestConnection *> receivers;
 
-    TestConnection(int id) : TDMAMultiConnection(id, 3, 4000){
-        DeviceCount = 3;
-        NodeReadTimeOut = 3000;
-    }
-
-    void SendRxPacket(PacketInfo& p) override {
-        if(NativeMillis() % 2 == 0)  //Introduce Noise
-            MultiConnection::SendRxPacket(p);
+    TestConnection(int id) : TDMAMultiConnection(id, 3, 10, 3){
+        SetRetryTimeout(30);
     }
 
     void onPacketReceived(PacketInfo& _, IOBuffer &io) final {
         auto& info = reinterpret_cast<MultiPacketInfo&>(_);
-        print("[%i]: C[%i]->C[%i]: Packet[%i]", ID, info.From, info.To, info.Type);
+        println("[%i]: C[%i]->C[%i]: Packet[%i]", ID, info.From, info.To, info.Type);
         switch (info.Type) {
             case 1:
                 assert(2.5f == io.ReadStd<float>(), "Packet Type 1 Failed!");
@@ -40,7 +32,7 @@ struct TestConnection : public TDMAMultiConnection {
     void onPacketCorrupted(PacketInfo& info) final { println("Connection [%i]: Corrupted", ID); }
 
     SocketReturn WriteToSocket(PacketInfo& pi, IOBuffer& io, int nbytes) final {
-        if(CanWrite()){
+        if(CanWrite() && NativeMillis() % 2 == 0){  //Introduce Noise
             auto s = io.Position();
             for (auto a: receivers){
                 io.Seek(s);
@@ -98,7 +90,7 @@ void test_connection() {
     c0->Start();
     c1->Start();
     c2->Start();
-    c0->SyncInterval = 5000;
+    c0->setSyncInterval(5000);
 
     c3->c = c4;
     c4->c = c3;
@@ -106,7 +98,7 @@ void test_connection() {
     c0->Send(1, 1, 2.5f);
     c1->Send(0, 2, 8L);
 
-    auto l = make_static_lambda(void, (IOBuffer & io), io.PrintfEnd("\tFrom C[0]\t", 123));
+    auto l = make_static_lambda(void, (IOBuffer & io), io.PrintfEnd("\tFrom C[0]\t\n", 123));
     c0->SendData(2, 3, l);
 
     c0->Send(1, 1, 2.5f);
@@ -122,7 +114,7 @@ void test_connection() {
         }
     });
 
-    auto t = new Timer(true, 1000, timer_lam);
+    auto t = new Timer(true, 200, timer_lam);
     t->Start();
 
     while (Yield());
@@ -204,12 +196,18 @@ void test_io() {
 }
 
 void test_timer(){
-    auto td = Time.setDecay(1000);
-    assert(!Time.hasDecayed(td), "Time Decayed To Early!");
+    Time<uint8_t> t;
 
-    println("Waiting For Timer Decay!");
-    while(!Time.hasDecayed(td)){}
-    println("Timer Decayed!");
+    auto td = t.createDecay(255);
+
+    for(int i = 0; i < 5; i++){
+        assert(!t.hasDecayed(td), "Time Decayed To Early!");
+        println("Waiting For Timer Decay!");
+        auto b = Clock.Millis();
+        while(!t.hasDecayed(td)){}
+        println("Timer Decayed In:%i", Clock.Millis() - b);
+        td = t.createDecay(i % 2 == 0 ? 100 : 255);
+    }
 }
 
 int main() {
@@ -219,9 +217,9 @@ int main() {
         printf("Wrong Endian Type!");
 
     println("%s", "Initializing Test Suite!");
-   // test_timer();
-   // test_io();
-   //create_timer(local_var);
-   // test_async();
+    test_timer();
+    test_io();
+    create_timer(local_var);
+    test_async();
     test_connection();
 }

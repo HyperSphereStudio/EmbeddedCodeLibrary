@@ -1,7 +1,19 @@
+/**********************************************************************
+   NAME: SimpleDebug.h
+   AUTHOR: Johnathan Bizzano
+   DATE: 6/22/2023
+
+    The Simple Project
+		Medium Level (from Low) library that abstracts away from embedded device hardware
+
+    Simple Debug
+		Provide Optional Debug Capabilities
+*********************************************************************/
+
 #ifndef Simple_DEBUG_C_H
 #define Simple_DEBUG_C_H
 
-#include "SimpleIO.h"
+#include "SimpleIO.hpp"
 
 #ifdef DEBUG
     #define assert(x, ...) if(!(x)) printerrln( __VA_ARGS__ );

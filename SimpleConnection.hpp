@@ -1,3 +1,15 @@
+/**********************************************************************
+   NAME: SimpleConnection.h
+   AUTHOR: Johnathan Bizzano
+   DATE: 6/22/2023
+
+    The Simple Project
+		Medium Level (from Low) library that abstracts away from embedded device hardware
+
+    Simple Connection
+		Medium Level Network library that provides access to several different protocols with error minimization
+*********************************************************************/
+
 #ifndef SIMPLE_PACKET_PROTOCOL_C_H
 #define SIMPLE_PACKET_PROTOCOL_C_H
 
@@ -5,10 +17,10 @@
 #include "malloc.h"
 #include "math.h"
 
-#include "SimpleDebug.h"
-#include "SimpleTimer.h"
-#include "SimpleIO.h"
-#include "SimpleLock.h"
+#include "SimpleDebug.hpp"
+#include "SimpleTimer.hpp"
+#include "SimpleIO.hpp"
+#include "SimpleLock.hpp"
 #include <numeric>
 #include <vector>
 
@@ -52,7 +64,8 @@ namespace Simple {
         None
     };
 
-    class AbstractConnection : public Task, public TimeKeeper<uint16_t> {
+    class AbstractConnection : public Task, public Time<uint16_t> {
+    protected:
         uint8_t RetryCount;
         uint16_t Timeout;
     public:
@@ -66,8 +79,8 @@ namespace Simple {
             return TaskReturn::Nothing;
         }
 
+        inline void SetRetryTimeout(uint16_t timeout) { Timeout = timeout; }
         inline size_t ReadBufferSize() { return read_buffer.Size(); }
-
         inline size_t WriteBufferSize() { return write_buffer.Size(); }
 
         inline void SetBufferMax(size_t max) {
@@ -86,7 +99,7 @@ namespace Simple {
             auto start = write_buffer.Position();
             info.ID = packet_count++;
             info.Retries = 0;
-            info.Retry = setDecay(0);
+            info.Retry = createDecay(0);
             WritePacketInfo(info, true);
             auto start_payload = write_buffer.Position();
             callback(write_buffer);
@@ -134,8 +147,8 @@ namespace Simple {
                 return true;
             }
             if (hasDecayed(pi.Retry)) {
-                pi.Retry = setDecay(Timeout);
-                dispose = ++pi.Retries >= RetryCount;
+                pi.Retry = createDecay(Timeout);
+                dispose = pi.Retries++ >= RetryCount;
                 return pi.Retries < RetryCount;
             }
             dispose = false;
@@ -178,8 +191,13 @@ namespace Simple {
             write_buffer.Seek(packet_start);
             if (write) {
                 auto ret = WriteToSocket(info, write_buffer, len);
-                if (ret == DontDispose)
+                if (ret == DontDispose){    //Failed Write
                     dispose = false;
+                    info.Retries -= 1;                  //Remove Try Since it failed
+                    info.Retry = createDecay(0);        //Force Retry
+                    write_buffer.Seek(data_start);
+                    WritePacketInfo(info, true);
+                }
             }
             if (dispose) {
                 write_buffer.RemoveRange(data_start, packet_start + len);
@@ -192,7 +210,7 @@ namespace Simple {
             uint8_t info_storage[PacketInfoSize()];
             auto &info = reinterpret_cast<PacketInfo &>(info_storage);
             auto startPtr = write_buffer.Position();
-            while (ReadPacketInfo(info, write_buffer, true)) { //Has Packet
+            while (ReadPacketInfo(info, write_buffer, true)){ //Has Packet
                 write_buffer.Seek(startPtr);
                 bool dispose = false;
                 bool write = onPacket(info, dispose);
@@ -215,21 +233,20 @@ namespace Simple {
             while (read_buffer.BytesAvailable() >= sizeof(MAGIC_NUMBER)) {
                 while (read_buffer.TryReadStd(&head) && (head != MAGIC_NUMBER))
                     read_buffer.SeekDelta(-3); //Try the next Byte
-
                 if (head == MAGIC_NUMBER) {
                     uint8_t info_storage[PacketInfoSize()];
                     auto &info = reinterpret_cast<PacketInfo &>(info_storage);
                     if (ReadPacketInfo(info, read_buffer, false)) {
                         auto start_packet_pos = read_buffer.Position();
                         if (read_buffer.BytesAvailable() >= info.Size + sizeof(TAIL_MAGIC_NUMBER)) {
-                            read_buffer.SeekDelta(
-                                    info.Size);                                       //Peak Ahead to make sure packet is not corrupted!
+                            read_buffer.SeekDelta(info.Size);                                       //Peak Ahead to make sure packet is not corrupted!
                             if (read_buffer.Read<uint8_t>() != TAIL_MAGIC_NUMBER) {
                                 onPacketCorrupted(info);
                                 continue;
                             }
                             auto end_packet_pos = read_buffer.Position();
                             read_buffer.Seek(start_packet_pos);
+
                             if (!HandlePacket(info, read_buffer))
                                 onPacketReceived(info, read_buffer);
                             read_buffer.Seek(end_packet_pos);
@@ -367,8 +384,11 @@ namespace Simple {
     struct TDMAMultiConnection : public MultiConnection {
     protected:
         uint8_t LastRxID = 0;
-        Time LastRxTime = setDecay(0);
-        Time LastSyncTime = setDecay(0);
+        Time LastRxTime = createDecay(0);
+        Time LastSyncTime = createDecay(0);
+        uint16_t NodeTimeout = 50;
+        uint16_t SyncInterval = 0;
+        uint8_t Devices = 1;
         uint16_t EstimatedLatency = 20;
 
         bool CanWritePacket(PacketInfo &pi, bool &dispose) override {
@@ -379,42 +399,56 @@ namespace Simple {
             return MultiConnection::CanWritePacket(pi, dispose);
         }
 
-        bool CanWrite() { return (LastRxID + 1 == ID) || (LastRxID + 1 == DeviceCount && ID == 0); }
+        bool CanWrite() { return (LastRxID + 1 == ID) || (LastRxID + 1 == Devices && ID == 0); }
 
         bool HandlePacket(PacketInfo &info, IOBuffer &io) override {
             if (info.Type == SynchronizeTimePacketType) {
-                LastRxTime = setDecay(0);
+                LastRxTime = createDecay(0);
                 MultiConnection::SendRxPacket(info);    //Send this to calculate the latency
                 LastRxID = io.ReadByte();
                 return true;
             }
             if (info.Type == ReceivedPacketType && *io.Interpret<uint8_t>() == SynchronizeTimePacketType) {
-                EstimatedLatency = getDelta(LastSyncTime) / 2;
+                bool sign;
+                EstimatedLatency = getDelta(LastSyncTime, sign) / 2;
                 return true;
             } else return MultiConnection::HandlePacket(info, io);
         }
-
     public:
-        uint16_t SyncInterval = 0;
-        uint16_t NodeReadTimeOut = 50;
-        uint8_t DeviceCount = 1;
 
-        TDMAMultiConnection(uint8_t id, uint8_t retries, uint16_t retry_timeout) : MultiConnection(id, retries,
-                                                                                                   retry_timeout) {}
+        TDMAMultiConnection(uint8_t id, uint8_t device_count, uint16_t node_timeout, uint8_t retries) : MultiConnection(id, retries, 0) {
+            NodeTimeout = node_timeout;
+            setDeviceCount(device_count);
+        }
 
+        void setSyncInterval(uint16_t s){
+            SyncInterval = s;
+            LastSyncTime = createDecay(SyncInterval);
+        }
+
+        void setNodeTimeout(uint16_t t){
+            NodeTimeout = t;
+            setDeviceCount(Devices);
+        }
+
+        void setDeviceCount(uint8_t c){
+            Devices = c;
+            Timeout = (uint16_t) (NodeTimeout * Devices * 1.25f);
+        }
+        
         TaskReturn Fire() override {
             if (hasDecayed(LastRxTime)) {
-                if (++LastRxID >= DeviceCount)
+                if (++LastRxID >= Devices)
                     LastRxID = 0;
-                LastRxTime = setDecay(NodeReadTimeOut);
+                LastRxTime = createDecay(NodeTimeout);
             }
             if (SyncInterval > 0) {
                 if (hasDecayed(LastSyncTime)) {
-                    for (int i = 0; i < DeviceCount; i++) {
+                    for (int i = 0; i < Devices; i++) {
                         if (i != ID)
                             Send(i, SynchronizeTimePacketType, LastRxID);
                     }
-                    LastSyncTime = setDecay(SyncInterval);
+                    LastSyncTime = createDecay(SyncInterval);
                     //LastRxTime.shift(EstimatedLatency);     //Allow some time for everything to be sent
                 }
             }

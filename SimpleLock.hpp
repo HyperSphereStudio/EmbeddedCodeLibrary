@@ -1,7 +1,19 @@
+/**********************************************************************
+   NAME: SimpleLock.hpp
+   AUTHOR: Johnathan Bizzano
+   DATE: 6/22/2023
+
+    The Simple Project
+		Medium Level (from Low) library that abstracts away from embedded device hardware
+
+    Simple Lock
+		Provide Multithreading support
+*********************************************************************/
+
 #ifndef Simple_Lock_C_H
 #define Simple_Lock_C_H
 
-#include "SimpleCore.h"
+#include "SimpleCore.hpp"
 
 typedef struct SimpleLock{
     volatile uint8_t lock;

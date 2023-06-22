@@ -1,3 +1,15 @@
+/**********************************************************************
+   NAME: SimpleLoop.hpp
+   AUTHOR: Johnathan Bizzano
+   DATE: 6/22/2023
+
+    The Simple Project
+		Medium Level (from Low) library that abstracts away from embedded device hardware
+
+    Simple Lock
+		Provide loop support
+*********************************************************************/
+
 #ifndef Simple_LOOP_C_H
 #define Simple_LOOP_C_H
 

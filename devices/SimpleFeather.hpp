@@ -1,7 +1,19 @@
+/**********************************************************************
+   NAME: SimpleFeather.hpp
+   AUTHOR: Johnathan Bizzano
+   DATE: 6/22/2023
+
+    The Simple Project
+		Medium Level (from Low) library that abstracts away from embedded device hardware
+
+    Simple Arduino
+        Feather implementation of the simple library
+*********************************************************************/
+
 #ifndef SIMPLE_FEATHER_C_H
 #define SIMPLE_FEATHER_C_H
 
-#include "SimpleArduino.h"
+#include "SimpleArduino.hpp"
 
 #include <SPI.h>
 #include <RH_RF95.h>
@@ -15,6 +27,7 @@ namespace Simple{
         UltraLong
     };
 
+    /**Wrapper of the radio to an IO **/
     class RadioIO : public IO{
     protected:
         RH_RF95 rf95;
@@ -68,11 +81,14 @@ namespace Simple{
         }
     };
 
+    /*Implementation of a feather radio connection which provides Time Divison Multiplexor Access and other tools to minimize error & maximize transmission speed
+     * **/
     class RadioConnection : public TDMAMultiConnection, protected RadioIO{
         uint8_t buffer[RH_RF95_MAX_MESSAGE_LEN];
     public:
-        RadioConnection(uint8_t id, uint8_t retries, uint16_t retry_timeout, uint8_t slaveSelectPin, uint8_t interruptPin, uint8_t resetPin) :
-            RadioIO(slaveSelectPin, interruptPin, resetPin), TDMAMultiConnection(id, retries, retry_timeout){}
+        RadioConnection(uint8_t id, uint8_t device_count, uint16_t node_timeout,
+                        uint8_t retries, uint8_t slaveSelectPin, uint8_t interruptPin, uint8_t resetPin) :
+            RadioIO(slaveSelectPin, interruptPin, resetPin), TDMAMultiConnection(id, device_count, node_timeout, retries){}
 
         bool Initialize(float frequency, int8_t power, Range range, bool useRFO = false) override {
             auto b = RadioIO::Initialize(frequency, power, range, useRFO);
