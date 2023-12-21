@@ -20,11 +20,15 @@
     #define lazyassert(x, msg) assert(x, msg)
     #define debug(fmt, ...) print(fmt, __VA_ARGS__)
     #define debugln(fmt, ...) println(fmt, __VA_ARGS__)
+    #define debugOnly(...) __VA_ARGS__
+    #define releaseOnly(...)
 #else
     #define assert(x, ...) (x)
     #define lazyassert(x, msg)
     #define debug(fmt, ...)
     #define debugln(fmt, ...)
+    #define debugOnly(...)
+    #define releaseOnly(...)  __VA_ARGS__
 #endif
 
 #endif

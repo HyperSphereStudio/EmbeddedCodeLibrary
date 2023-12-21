@@ -21,6 +21,8 @@ namespace Simple{
     struct RefDeleter{
         bool shouldDelete = false;
 
+        RefDeleter(bool shouldDelete = false) : shouldDelete(shouldDelete){}
+
         void operator()(T* p){
             if(shouldDelete){
                 delete p;
@@ -40,5 +42,7 @@ namespace Simple{
 
     /**Create a reference with an owner**/
     template<typename T> inline ref<T> Ref(T* t, bool owns){ return ref<T>(t, RefDeleter<T>(owns)); }
+
+    struct Empty{};
 }
 #endif

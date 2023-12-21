@@ -49,7 +49,9 @@ namespace Simple {
 */
     static bool InitializeIO();
 
-    struct IOBuffer;
+    struct IOVector;
+    struct IOArray;
+    struct SeekableIO;
 
     /**Base Implementation of a stream. Is a wrapper over ports
      **/
@@ -71,27 +73,25 @@ namespace Simple {
 
         /** Read from another IO to this IO **/
         int ReadFrom(IO& io){ return ReadFrom(io, io.BytesAvailable()); }
+        int ReadFrom(IO& io, int bytes){ return io.WriteTo(*this, bytes); }
 
         /** Read $bytes bytes from another IO to this IO  **/
-        int ReadFrom(IO& io, int bytes){
-            bytes = min(bytes, io.BytesAvailable());
-            int buf_size = min(BUFSIZ, bytes);
+        int WriteTo(IO& io, int bytes){
+            int buf_size = min(BUFSIZ, min(bytes, BytesAvailable()));
+            int bytes_remaining = bytes;
             uint8_t buffer[buf_size];
-            int bytes_read = 0;
-            while (io.BytesAvailable() > 0 && bytes > 0){
-                int read = io.ReadBytesUnlocked(buffer, min(buf_size, bytes));
-                bytes_read += read;
-                bytes -= read;
-                WriteBytes(buffer, read);
+
+            while (bytes_remaining > 0 && BytesAvailable() > 0){
+                int read = ReadBytesUnlocked(buffer, min(buf_size, bytes_remaining));
+                bytes_remaining -= read;
+                io.WriteBytes(buffer, read);
             }
-            return bytes_read;
+
+            return bytes;
         }
 
         /** Write the bytes from this IO to another IO **/
         int WriteTo(IO& io) { return WriteTo(io, BytesAvailable()); }
-
-        /** Write $bytes bytes from this IO to another IO **/
-        int WriteTo(IO& io, int bytes){ return io.ReadFrom(*this, bytes); }
 
         /** Write a string safely (with a length) **/
         void WriteString(const char *str) { WriteString((char *) str); }
@@ -390,13 +390,13 @@ namespace Simple {
         }
 
         /**Read a c string from the buffer (null terminated) and return the chars read **/
-        int ReadUnsafeString(IOBuffer& buffer) { return ReadStringUntilChars(buffer, false, '\0'); }
+        int ReadUnsafeString(SeekableIO& buffer) { return ReadStringUntilChars(buffer, false, '\0'); }
 
         /**Read a line from a buffer and return the chars read **/
-        int ReadLine(IOBuffer& buffer) { return ReadStringUntilChars(buffer, true, '\n', '\r'); }
+        int ReadLine(SeekableIO& buffer) { return ReadStringUntilChars(buffer, true, '\n', '\r'); }
 
         /**Read a buffer until certain stop chars. Greedy means keep reading until a non stop char is found after stop char **/
-        template<typename... Chars> int ReadStringUntilChars(IOBuffer& buffer, bool greedy, Chars... stop_chars);
+        template<typename... Chars> int ReadStringUntilChars(SeekableIO& buffer, bool greedy, Chars... stop_chars);
 
         /**Read a raw value from the stream (count)
         * WARNING: DO NOT USE THIS FOR TYPES THAT ARE NOT PORTABLE AND SEND THEM ACROSS THE NETWORK
@@ -423,10 +423,10 @@ namespace Simple {
         }
 
         /**Read an array from this stream to $b**/
-        template<typename T> int ReadArray(int* length, IOBuffer& b);
+        template<typename T> int ReadArray(int* length, IOVector& b);
 
         /**Read an string from this stream to $b**/
-        int ReadString(int* length, IOBuffer& b);
+        int ReadString(int* length, IOVector& b);
 
         /**Read a standardized value from the stream. Use this for integral types etc to send information to different devices**/
         template<typename T> void ReadStd(T *v) {
@@ -516,17 +516,28 @@ namespace Simple {
     };
 
     /**Simple Implementation of a in memory buffer from the IO
-     **/
-    class IOBuffer : public IO {
-        size_t position = 0, max_size;
+   **/
+    struct SeekableIO : public IO{
+        virtual size_t Position() = 0;
+        virtual size_t Size() = 0;
+
+        virtual void Seek(size_t position) = 0;
+        void SeekDelta(size_t delta){ Seek(Position() + delta); }
+        void SeekStart(){ Seek(0); }
+        void SeekEnd(){ Seek(Size()); }
+        int BytesAvailable() final { return Size() - Position(); }
+    };
+
+    class IOVector : public SeekableIO {
+        size_t position = 0, max_size = 0;
         std::vector<uint8_t> memory;
     public:
-        IOBuffer() : max_size(numeric_limits<long>::max()){}
-        IOBuffer(int capacity, long max_size = numeric_limits<long>::max()) : memory(capacity), max_size(max_size) {}
-        IOBuffer(void *data, int length, long max_size = numeric_limits<long>::max()) : IOBuffer(length, max_size) {
-            WriteBytes((uint8_t*) data, length);
-            SeekStart();
-        }
+        IOVector() : max_size(numeric_limits<long>::max()){}
+        IOVector(int capacity, long max_size = numeric_limits<long>::max()) : memory(capacity), max_size(max_size) {}
+
+        size_t Position() final { return position; }
+        size_t Size() final { return memory.size(); }
+        void Seek(size_t pos) final { position = pos; }
 
         int WriteByte(uint8_t c) {
             if (memory.size() + 1 > max_size)
@@ -572,14 +583,7 @@ namespace Simple {
             }
         }
 
-        inline int BytesAvailable() final { return memory.size() - position; }
-        inline size_t Position(){ return position; }
-        inline void Seek(size_t pos){ position = pos; }
-        inline void SeekDelta(size_t delta){ position += delta; }
-        inline void SeekStart(){ position = 0; }
-        inline void SeekEnd(){ position = Capacity(); }
-        inline size_t Capacity() { return memory.size(); }
-        inline size_t Size(){ return memory.size(); }
+        inline size_t Capacity() { return memory.capacity(); }
         inline void SetSize(size_t s){ memory.resize(s); }
         inline void Reserve(size_t s) { memory.reserve(s); }
         void Print(IO& io){
@@ -589,7 +593,7 @@ namespace Simple {
                     io.Printf(", %i", memory[i]);
                 else io.Printf("%i", memory[i]);
             }
-            io.Printf(": Size=%i, Position=%i]\n\r", Size(), Position());
+            io.Printf(": Size=%i, Position=%i, Capacity=%i]\n\r", Size(), Position(), Capacity());
         }
 
         void Clear(){
@@ -611,18 +615,153 @@ namespace Simple {
         /**Read the raw memory of the io at the specified position **/
         template<typename T = uint8_t> T* Interpret(){ return (T*) &memory[position]; }
 
-        inline int ReadFrom(IOBuffer& b){return ReadFrom(b, b.BytesAvailable()); }
+        inline int ReadFrom(SeekableIO& b){return ReadFrom(b, b.BytesAvailable()); }
         inline int ReadFrom(IO& io, int bytes){ return IO::ReadFrom(io, bytes); }
         inline int ReadFrom(IO& io){ return IO::ReadFrom(io); }
-        int ReadFrom(IOBuffer& b, int count){ return WriteBytes(b.Interpret<uint8_t>(), min(count, b.BytesAvailable())); }
         int WriteTo(IO& io){ return WriteTo(io, BytesAvailable()); }
         int WriteTo(IO& io, int count){ return io.WriteBytes(Interpret<uint8_t>(), min(count, BytesAvailable())); }
         inline void Reset(){ position = 0; }
         void RemoveRange(size_t start, size_t end){ memory.erase(memory.begin() + start, memory.begin() + end); }
+        void InsertRange(size_t start, int length){ memory.insert(memory.begin() + start, length, 0); }
+    };
+
+    struct IOArray : public SeekableIO{
+    private:
+        ref<uint8_t> memory;
+        size_t position, size, capacity;
+
+        void WriteSize(int length){
+            auto pl = position + length;
+            if(pl > size)
+                size = pl;
+        }
+
+    public:
+        void Seek(size_t pos) final { position = pos; }
+
+        size_t Position() final { return position; }
+        uint8_t* Begin() { return memory.get() + position; }
+        uint8_t* End() { return memory.get() + size; }
+        size_t Size() final { return size; }
+        inline size_t Capacity() const { return capacity; }
+
+        explicit IOArray(int capacity = BUFSIZ) : memory(new uint8_t[capacity]), capacity(capacity), size(0), position(0){}
+        IOArray(ref<uint8_t> heap_ref, int capacity, int size = 0) : memory(std::move(heap_ref)), capacity(capacity), size(size), position(0){}
+
+        int WriteByte(uint8_t c) {
+            if(capacity > position){
+                WriteSize(1);
+                memory.get()[position++] = c;
+                return true;
+            }
+            return false;
+        }
+
+        int WriteBytes(uint8_t *ptr, int nbytes) override{
+            if(nbytes == 1)
+                return WriteByte(*ptr);
+            if(nbytes > 1 && position + nbytes <= capacity){
+                memmove(Begin(), ptr, nbytes);
+                WriteSize(nbytes);
+                position += nbytes;
+                return true;
+            }
+            return false;
+        }
+
+        int ReadByte() { return memory.get()[position++]; }
+
+        int ReadBytesUnlocked(uint8_t *ptr, int buffer_size) override{
+            auto ba = BytesAvailable();
+
+            if(ba > 0){
+                if(buffer_size == 1){
+                    *ptr = ReadByte();
+                    return 1;
+                }else{
+                    auto read_bytes = min(buffer_size, ba);
+                    memmove(ptr, Begin(), read_bytes);
+                    position += read_bytes;
+                    return read_bytes;
+                }
+            }
+
+            return 0;
+        }
+
+        void Reserve(size_t s) {
+            if(s > capacity){
+                auto p = new uint8_t[s];
+                memcpy(p, memory.get(), size);
+                memory.reset(p, RefDeleter<uint8_t>(true));
+                capacity = s;
+            }
+        }
+
+        void SetBytesAvailable(size_t s, bool adjMemory = false){
+            SetSize(s + position, adjMemory);
+        }
+
+        void SetSize(size_t s, bool adjMemory = false){
+            if(adjMemory && s > capacity){
+                Reserve(s);
+            }
+            size = s;
+        }
+
+        /**Read the raw memory of the io at the current position**/
+        template<typename T = uint8_t> T* Interpret(size_t pos){ return (T*) &memory.get()[pos]; }
+        /**Read the raw memory of the io at the specified position **/
+        template<typename T = uint8_t> T* Interpret(){ return (T*) &memory.get()[position]; }
+
+        void Clear(){
+            position = 0;
+            size = 0;
+        }
+
+        void ClearToPosition(){
+            if(position != 0){
+                RemoveRange(0, position);
+                position = 0;
+            }
+        }
+
+        void Print(IO& io){
+            io.WriteByte('[');
+            for(auto i = position; i < size; i++){
+                if(i != position)
+                    io.Printf(", %i", memory.get()[i]);
+                else io.Printf("%i", memory.get()[i]);
+            }
+            io.Printf(": Size=%i, Position=%i, Capacity=%i]\n\r", Size(), Position(), Capacity());
+        }
+
+        inline int ReadFrom(IOVector& b){return ReadFrom(b, b.BytesAvailable()); }
+        inline int ReadFrom(IO& io, int bytes){ return IO::ReadFrom(io, bytes); }
+        inline int ReadFrom(IO& io){ return IO::ReadFrom(io); }
+        int WriteTo(IO& io){ return WriteTo(io, BytesAvailable()); }
+        int WriteTo(IO& io, int count){ return io.WriteBytes(Interpret<uint8_t>(), min(count, BytesAvailable())); }
+        void RemoveRange(size_t start, int length){
+            start = max((size_t) 0, start);
+            auto end = start + length;
+
+            memmove(memory.get() + start, memory.get() + end, size - end);        //Move the end to this location
+
+            size -= length;
+        }
+
+        void InsertRange(size_t start, int length){
+            start = max((size_t) 0, start);
+            auto end = start + length;
+
+            memmove(memory.get() + end, memory.get() + start, size - start);         //Move the end to this location
+
+            size += length;
+        }
     };
 
     template<typename... Chars>
-    int IO::ReadStringUntilChars(Simple::IOBuffer& buffer, bool greedy, Chars ...stop_chars) {
+    int IO::ReadStringUntilChars(Simple::SeekableIO& buffer, bool greedy, Chars ...stop_chars) {
         uint8_t c;
         auto pos = buffer.Position();
         bool foundStopChar = false;
@@ -646,14 +785,14 @@ namespace Simple {
     }
 
     template<typename T>
-    int IO::ReadArray(int *length, Simple::IOBuffer &b){
+    int IO::ReadArray(int *length, Simple::IOVector &b){
         auto pos = b.Position();
         *length = ReadStd<uint32_t>();
         WriteTo(b, *length * sizeof(T));
         return pos;
     }
 
-    int IO::ReadString(int *length, Simple::IOBuffer &b){
+    int IO::ReadString(int *length, Simple::IOVector &b){
         auto pos = ReadArray<char>(length, b);
         *length = *length + 1;
         b.WriteByte('\0');

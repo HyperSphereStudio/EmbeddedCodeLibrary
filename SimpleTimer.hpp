@@ -53,7 +53,7 @@ namespace Simple {
             auto now = Millis();
             t.value = decay + now;
                                                     //Overflow
-            t.cycled = t.value >= decay ? true : false;
+            t.cycled = t.value >= decay;
             t.decayed = false;
             return t;
         }

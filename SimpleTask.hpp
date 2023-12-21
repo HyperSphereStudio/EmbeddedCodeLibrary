@@ -123,7 +123,7 @@ namespace Simple{
 
 /**Run a lambda asynchronously**/
 #define async(capture, ...)                                                             \
-        define_local_lambda(CAT(__async, __LINE__), capture, void, (), __VA_ARGS__);    \
+        make_local_lambda(CAT(__async, __LINE__), capture, void, (), __VA_ARGS__);    \
         Async(CAT(__async, __LINE__))
 }
 

@@ -3,6 +3,4 @@ project(sandbox)
 
 set(CMAKE_CXX_STANDARD 11)
 
-add_executable(sandbox
-        main.cpp
-        ../SimpleLambda.h)
+add_executable(sandbox main.cpp)
